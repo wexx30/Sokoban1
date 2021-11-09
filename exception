@@ -1,0 +1,17 @@
+#include <iostream>
+
+using namespace std;
+
+int main (){
+    float width , height;
+    cout << "Pleae enter width and height:"<< endl;
+    if(cin >> width >> height){
+        cout << "Area:" << width*height << endl;
+
+    }
+    else{
+        cout << "error" << endl;
+
+    }
+    return 0;
+}
