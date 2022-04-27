@@ -1,0 +1,411 @@
+利用捷徑簡化「我的雲端硬碟」存取方式 … 
+未來幾週內，項目若同時位於多個資料夾中，系統會將這些項目取代為捷徑。你的檔案和資料夾存取權不會變更。瞭解詳情
+#include <curses.h>
+#include <string>
+#include <cstring>
+#include <sstream>
+#include <unistd.h>
+#include <stack>
+
+using namespace std;
+
+#define MAX_ROW 25
+#define MAX_COLUMN 80
+
+char map[MAX_ROW][MAX_COLUMN];
+char source_map[MAX_ROW][MAX_COLUMN];
+int R, C;
+int scale = 1;
+int worker_x, worker_y;                     // used to move worker
+int box_x, box_y;                           // used to move box
+int Next_x, Next_y, NextNext_x, NextNext_y; // used to backup
+int c = 0;                                  // getch()
+int start_x, start_y, end_x, end_y;
+
+enum Direction{LEFT, UP, DOWN, RIGHT};
+
+class CStatus{
+	public:
+		int wall;
+		int box;
+		int worker;
+		int level;
+		int destination;
+		int arrival;
+		int steps;
+		bool valid;
+
+		CStatus(int n = 0): wall(n), box(n), worker(n), level(1), destination(n), arrival(n), steps(n), valid(true){}
+
+		void init(){
+			wall = 0;
+			box = 0;
+			worker = 0;
+			destination = 0;
+			arrival = 0;
+			steps = 0;
+			valid = true;
+		}
+
+		void print(){
+			move(0, 35); addstr("+----------------+");
+			move(1, 35); addstr("|                |");
+			move(2, 35); addstr("|                |");
+			move(3, 35); addstr("|                |");
+			move(4, 35); addstr("|                |");
+			move(5, 35); addstr("+----------------+");
+
+			if(valid == false){
+				move(7, 36); printw("invalid map");
+			}
+			move(1, 36); printw("Level:%d", level);
+			move(2, 36); printw("Destination:%d", destination);
+			move(3, 36); printw("Arrival:%d", arrival);
+			move(4, 36); printw("Steps:%d", steps);
+			move(9, 36); printw("press 'b' to trace back your move");
+			refresh();
+		}
+
+		void count_arrival(){
+			arrival = 0;
+			for(int i=0; i<R; i++){
+			for(int j=0; j<C; j++){
+				if(map[i][j] == 'C') arrival++;
+			}
+			}
+		}
+};
+
+class CBackup{
+	public:
+		char a;
+		int a_x, a_y;
+		char b;
+		int b_x, b_y;
+		char c;
+		int c_x, c_y;
+		CBackup(char ch1, int i, int j, char ch2, int k, int l, char ch3, int m, int n):
+			a(ch1), a_y(i), a_x(j), b(ch2), b_y(k), b_x(l), c(ch3), c_y(m), c_x(n){}
+
+		void replace(){
+			map[a_y][a_x] = a;
+			map[b_y][b_x] = b;
+			map[c_y][c_x] = c;
+		}
+};
+
+stack<CBackup> backup;
+CStatus status;
+
+void error_message(const char *s){
+	move(6, 36); addstr(s);
+	refresh();
+	usleep(250000);
+}
+
+int ReadMap(int n){
+	FILE *fptr;
+	stringstream s;
+	string str = "";
+	char ch;
+
+	s << n;
+	s >> str;
+	while(str.length() < 3) str = "0" + str;
+	string map_name = "map" + str + ".txt";
+	const char *cstr = map_name.c_str();
+
+	for(int i=0; i<MAX_ROW; i++) // init the map
+	for(int j=0; j<MAX_COLUMN; j++){
+		source_map[i][j] = ' ';
+		map[i][j] = ' ';
+	}
+
+	int i = 0;
+	char line[MAX_COLUMN];
+	if(!(fptr = fopen(cstr, "r"))){
+		error_message("Fail to read the map. Place reload the map");
+	}
+	else{
+		while(!feof(fptr)){
+			memset(line, ' ', sizeof(line));
+			fgets(line, MAX_COLUMN, fptr);
+			for(int j=0; j<MAX_COLUMN; j++){
+				if(line[j] == '\n' || line[j] == '\0') break;
+				source_map[i][j] = line[j];
+			}
+			i++;
+		}
+
+		// because the map may not start at (0,0), we refit the map
+		start_x = MAX_COLUMN, start_y = MAX_ROW;
+		end_x = 0, end_y = 0;
+		for(int i=0; i<MAX_ROW; i++){
+		for(int j=0; j<MAX_COLUMN; j++){
+			if(source_map[i][j] == 'H' || source_map[i][j] == 'B' || source_map[i][j] == 'D' || source_map[i][j] == 'C' || source_map[i][j] == 'W' || source_map[i][j] == 'E'){
+			if(i < start_y) start_y = i;
+			if(j < start_x) start_x = j;
+			if(i > end_y) end_y = i;
+			if(j > end_x) end_x = j;
+			}
+		}
+		}
+		status.init();
+		R = end_y - start_y + 1; // ROW will be end_y - start_y + 1
+		C = end_x - start_x + 1; // COLUMN will be end_x - start_x + 1
+		for(int i=0; i<R; i++){
+		for(int j=0; j<C; j++){
+			map[i][j] = source_map[i+start_y][j+start_x];
+		}
+		}
+
+		// Bonus
+		for(int i=0; i<R; i++){
+		for(int j=0; j<C; j++){
+			if     (map[i][j] == 'B')  status.box++;
+			else if(map[i][j] == 'D')  status.destination++;
+			else if(map[i][j] == 'C'){ status.box++; status.destination++; status.arrival++;}
+			else if(map[i][j] == 'W')  status.worker++;
+			//else if(map[i][j] != 'H' && map[i][j] != '0' && map[i][j] != ' ') return 0;
+		}
+		}
+		if(status.box != status.destination || status.worker != 1)
+			return 0;
+		else
+			return 1;
+	}
+}
+
+void showMap(){
+	clear();
+
+	int x = 0, y = 0;
+	int color = 2;
+
+	while(R * scale > MAX_ROW || C * scale > MAX_COLUMN) scale--;
+
+	for(int i=0; i<R; i++){
+	for(int j=0; j<C; j++){
+
+			if     (map[i][j] == 'H')  color = 1;
+			else if(map[i][j] == '0')  color = 2;
+			else if(map[i][j] == ' ')  color = 2;
+			else if(map[i][j] == 'B')  color = 3;
+			else if(map[i][j] == 'D')  color = 4;
+			else if(map[i][j] == 'C')  color = 5;
+			else if(map[i][j] == 'W'){ color = 6; worker_y = i, worker_x = j; }
+			else if(map[i][j] == 'E'){ color = 5; worker_y = i, worker_x = j; }
+
+			attron(COLOR_PAIR(color));
+			for(int n=0; n<scale; n++){
+			for(int m=0; m<scale; m++){
+				move(y * scale + n, x * scale + m);
+				if     (map[i][j] == 'D') addch(' ');
+				else if(map[i][j] == 'C') addch('B');
+				else if(map[i][j] == 'E') addch('W');
+				else                      addch(map[i][j]);
+			}
+			}
+			attroff(COLOR_PAIR(color));
+			x++;
+	}
+	x = 0; y += 1;
+	}
+	status.count_arrival();
+	status.print();
+
+#ifdef _DEBUG
+	move(15, 36); addstr("Debug log:");
+	move(16, 36); printw("start_y:%d end_y:%d", start_y, end_y);
+	move(17, 36); printw("start_x:%d end_x:%d", start_x, end_x);
+	move(18, 36); printw("R=%d C=%d", R, C);
+	move(19, 36); printw("scale:%d", scale);
+#endif
+}
+
+char NextToWorker(Direction d){
+	if     (d == LEFT)  return map[worker_y][worker_x-1];
+	else if(d == DOWN)  return map[worker_y+1][worker_x];
+	else if(d == UP)    return map[worker_y-1][worker_x];
+	else if(d == RIGHT) return map[worker_y][worker_x+1];
+}
+
+char NextNextToWorker(Direction d){
+	if     (d == LEFT)  return map[worker_y][worker_x-2];
+	else if(d == DOWN)  return map[worker_y+2][worker_x];
+	else if(d == UP)    return map[worker_y-2][worker_x];
+	else if(d == RIGHT) return map[worker_y][worker_x+2];
+}
+
+void mem_step(Direction d){
+	int i = 0, j = 0;
+	if     (d == LEFT)  j = -1;
+	else if(d == DOWN)  i =  1;
+	else if(d == UP)    i = -1;
+	else if(d == RIGHT) j =  1;
+
+	Next_y = worker_y + i; Next_x = worker_x + j;
+	NextNext_y = worker_y + 2 * i; NextNext_x = worker_x + 2 * j;
+	CBackup buffer(map[worker_y][worker_x], worker_y, worker_x,
+			           map[Next_y][Next_x], Next_y, Next_x,
+								 map[NextNext_y][NextNext_x], NextNext_y, NextNext_x);
+	backup.push(buffer);
+}
+
+void MoveBox(Direction d){
+	int i = 0, j = 0;
+	if     (d == LEFT)  j = -1;
+	else if(d == DOWN)  i =  1;
+	else if(d == UP)    i = -1;
+	else if(d == RIGHT) j =  1;
+
+	if(NextNextToWorker(d) == ' '){
+		if(map[box_y][box_x] == 'B')
+			map[box_y][box_x] = ' ';
+		else if(map[box_y][box_x] == 'C')
+			map[box_y][box_x] = 'D';
+
+		map[box_y+i][box_x+j] = 'B';
+	}
+	else if(NextNextToWorker(d) == 'D'){
+		if(map[box_y][box_x] == 'B')
+			map[box_y][box_x] = ' ';
+		else if(map[box_y][box_x] == 'C')
+			map[box_y][box_x] = 'D';
+
+		map[box_y+i][box_x+j] = 'C';
+	}
+}
+
+void MoveWorker(Direction d){
+	int i = 0, j = 0;
+	if     (d == LEFT)  j = -1;
+	else if(d == DOWN)  i =  1;
+	else if(d == UP)    i = -1;
+	else if(d == RIGHT) j =  1;
+
+	if(NextToWorker(d) == ' '){ // case "W " "WD"
+		if(map[worker_y][worker_x] == 'W')
+			map[worker_y][worker_x] = ' ';
+		else if(map[worker_y][worker_x] == 'E')
+			map[worker_y][worker_x] = 'D';
+
+		map[worker_y+i][worker_x+j] = 'W';
+		status.steps++;
+		showMap();
+	}
+	else if(NextToWorker(d) == 'D'){ // case "WD" "ED"
+		if(map[worker_y][worker_x] == 'W')
+			map[worker_y][worker_x] = ' ';
+		else if(map[worker_y][worker_x] == 'E')
+			map[worker_y][worker_x] = 'D';
+
+		map[worker_y+i][worker_x+j] = 'E';
+		status.steps++;
+		showMap();
+	}
+	else if((NextToWorker(d)     == 'B' || NextToWorker(d)     == 'C') &&
+		      (NextNextToWorker(d) == ' ' || NextNextToWorker(d) == 'D')){
+		box_y = worker_y + i; box_x = worker_x + j;
+		MoveBox(d);
+		MoveWorker(d);
+		showMap();
+	}
+	else{
+		error_message("you can not go there!");
+		backup.pop(); //no moving, so don't need to backup
+		showMap();
+	}
+
+	status.count_arrival();
+	if(status.arrival == status.destination){ // if pass
+		showMap();
+		move(6, 36); addstr("pass!");
+		refresh();
+		usleep(1000000); //delay 1s
+
+		backup = stack<CBackup>(); // clear backup stack
+		status.level++;
+		if(!ReadMap(status.level)) status.valid = false;
+		showMap();
+	}
+}
+
+void Move(Direction d){
+	mem_step(d);
+	MoveWorker(d);
+}
+
+void resize(int mode){
+	if     (mode == 1){
+		if(R * (scale + 1) <= MAX_ROW && C * (scale + 1) <= MAX_COLUMN){
+			scale++;
+			showMap();
+		}
+	}
+	else if(mode == 0){
+		if(scale > 1){
+			scale--;
+			showMap();
+		}
+	}
+}
+
+void change_level(int mode){
+	if(mode == 1){
+		status.level++;
+	}
+	else if(mode == 0 && status.level > 1){
+		status.level--;
+	}
+	if(!ReadMap(status.level)) status.valid = false;
+	backup = stack<CBackup>(); // clear backup stack
+	showMap();
+}
+
+void back(){
+	if(!(backup.empty())){
+		backup.top().replace();
+		backup.pop();
+		status.steps--;
+		showMap();
+	}
+	else{
+		error_message("you can not trace back more!");
+		showMap();
+	}
+}
+
+int main(){
+	initscr();
+	curs_set(0);
+	start_color();
+	keypad(stdscr, TRUE);
+	noecho();
+
+	init_pair(1, COLOR_YELLOW, COLOR_BLACK);
+	init_pair(2, COLOR_BLACK, COLOR_BLACK);
+	init_pair(3, COLOR_RED, COLOR_BLACK);
+	init_pair(4, COLOR_CYAN, COLOR_CYAN);
+	init_pair(5, COLOR_WHITE, COLOR_CYAN);
+	init_pair(6, COLOR_WHITE, COLOR_BLACK);
+
+	if(!ReadMap(status.level)) status.valid = false;
+	showMap();
+
+	do{
+		c = getch();
+		if     (c == 'h' || c == 'a' || c == KEY_LEFT)  Move(LEFT);
+		else if(c == 'j' || c == 's' || c == KEY_DOWN)  Move(DOWN);
+		else if(c == 'k' || c == 'w' || c == KEY_UP)    Move(UP);
+		else if(c == 'l' || c == 'd' || c == KEY_RIGHT) Move(RIGHT);
+		else if(c == '+')                               resize(1);
+		else if(c == '-')                               resize(0);
+		else if(c == KEY_NPAGE)                         change_level(1);
+		else if(c == KEY_PPAGE)                         change_level(0);
+		else if(c == 'b')                               back();
+	}while(c != 'q');
+
+	endwin();
+	return 0;
+}
